@@ -1,0 +1,185 @@
+from openwa import WhatsAPIDriver
+import time
+import sqlite3
+import pandas as pd
+from datetime import datetime
+
+# Conectar ao banco SQLite
+con = sqlite3.connect("gastos.db", check_same_thread=False)
+cur = con.cursor()
+
+# Criar tabela de gastos se não existir
+cur.execute("""
+CREATE TABLE IF NOT EXISTS gastos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    data TEXT,
+    valor REAL,
+    categoria TEXT
+)
+""")
+# Criar tabela de configurações (para armazenar limite mensal)
+cur.execute("""
+CREATE TABLE IF NOT EXISTS config (
+    chave TEXT PRIMARY KEY,
+    valor REAL
+)
+""")
+# Definir limite padrão se não existir
+cur.execute("INSERT OR IGNORE INTO config (chave, valor) VALUES ('limite_mensal', 2000)")
+con.commit()
+
+driver = WhatsAPIDriver()
+print("📲 Escaneie o QR Code com seu WhatsApp!")
+time.sleep(15)
+print("✅ Bot de gastos avançado iniciado!")
+
+# ---------------- Funções auxiliares ----------------
+
+def get_limite():
+    cur.execute("SELECT valor FROM config WHERE chave='limite_mensal'")
+    return cur.fetchone()[0]
+
+def set_limite(novo_limite):
+    cur.execute("UPDATE config SET valor=? WHERE chave='limite_mensal'", (novo_limite,))
+    con.commit()
+    return f"✅ Limite mensal atualizado para R$ {novo_limite:.2f}"
+
+def registrar_gasto(valor, categoria):
+    data = datetime.now().strftime("%d/%m/%Y %H:%M")
+    cur.execute("INSERT INTO gastos (data, valor, categoria) VALUES (?, ?, ?)", (data, valor, categoria))
+    con.commit()
+    return f"✅ Gasto registrado: R$ {valor:.2f} - {categoria}"
+
+def carregar_df():
+    return pd.read_sql_query("SELECT * FROM gastos", con)
+
+def relatorio_geral():
+    df = carregar_df()
+    if df.empty:
+        return "📂 Nenhum gasto registrado ainda."
+    ultimos = df.tail(5)
+    resposta = "📊 Últimos gastos:\n"
+    for _, linha in ultimos.iterrows():
+        resposta += f"{linha['data']} - R$ {linha['valor']:.2f} - {linha['categoria']}\n"
+    total = df["valor"].sum()
+    resposta += f"\n💰 Total acumulado: R$ {total:.2f}"
+    return resposta
+
+def relatorio_mes():
+    df = carregar_df()
+    if df.empty:
+        return "📂 Nenhum gasto registrado este mês."
+    mes_atual = datetime.now().strftime("%m/%Y")
+    df["mes"] = pd.to_datetime(df["data"], dayfirst=True).dt.strftime("%m/%Y")
+    df_mes = df[df["mes"] == mes_atual]
+    if df_mes.empty:
+        return "📂 Nenhum gasto registrado este mês."
+    total = df_mes["valor"].sum()
+    resposta = f"📊 Resumo de {mes_atual}\n💰 Total: R$ {total:.2f}\n📌 Por categoria:\n"
+    for cat, soma in df_mes.groupby("categoria")["valor"].sum().items():
+        resposta += f"➡️ {cat}: R$ {soma:.2f}\n"
+    return resposta
+
+def relatorio_categoria(cat):
+    df = carregar_df()
+    if df.empty:
+        return f"📂 Nenhum gasto encontrado na categoria '{cat}'."
+    df_cat = df[df["categoria"].str.lower() == cat]
+    if df_cat.empty:
+        return f"📂 Nenhum gasto encontrado na categoria '{cat}'."
+    total = df_cat["valor"].sum()
+    resposta = f"📊 Relatório da categoria '{cat}':\n"
+    for _, linha in df_cat.tail(5).iterrows():
+        resposta += f"{linha['data']} - R$ {linha['valor']:.2f}\n"
+    resposta += f"\n💰 Total na categoria: R$ {total:.2f}"
+    return resposta
+
+def top_categorias():
+    df = carregar_df()
+    if df.empty:
+        return "📂 Nenhum gasto registrado."
+    resposta = "📈 Top categorias:\n"
+    categorias = df.groupby("categoria")["valor"].sum().sort_values(ascending=False)
+    for cat, soma in categorias.head(5).items():
+        resposta += f"➡️ {cat}: R$ {soma:.2f}\n"
+    return resposta
+
+def maior_gasto():
+    df = carregar_df()
+    if df.empty:
+        return "📂 Nenhum gasto registrado."
+    maior = df.loc[df["valor"].idxmax()]
+    return f"🏆 Maior gasto: R$ {maior['valor']:.2f} - {maior['categoria']} ({maior['data']})"
+
+def saldo():
+    limite = get_limite()
+    df = carregar_df()
+    if df.empty:
+        return f"📊 Orçamento do mês: R$ {limite:.2f}\n💰 Gasto até agora: R$ 0.00\n✅ Saldo disponível: R$ {limite:.2f}"
+    mes_atual = datetime.now().strftime("%m/%Y")
+    df["mes"] = pd.to_datetime(df["data"], dayfirst=True).dt.strftime("%m/%Y")
+    df_mes = df[df["mes"] == mes_atual]
+    total = df_mes["valor"].sum() if not df_mes.empty else 0
+    restante = limite - total
+    return f"📊 Orçamento do mês: R$ {limite:.2f}\n💰 Gasto até agora: R$ {total:.2f}\n✅ Saldo disponível: R$ {restante:.2f}"
+
+# ---------------- Loop principal ----------------
+
+while True:
+    for contato in driver.get_unread():
+        for msg in contato.messages:
+            if msg.type == "chat":
+                texto = msg.content.lower().strip()
+
+                # Registrar gasto
+                if texto.startswith("gasto"):
+                    try:
+                        partes = texto.split(" ", 2)
+                        valor = float(partes[1].replace(",", "."))
+                        categoria = partes[2] if len(partes) > 2 else "Outros"
+                        resposta = registrar_gasto(valor, categoria)
+                        contato.chat.send_message(resposta)
+                    except:
+                        contato.chat.send_message("⚠️ Formato inválido. Use: gasto <valor> <categoria>")
+
+                # Relatórios
+                elif texto == "relatório":
+                    contato.chat.send_message(relatorio_geral())
+                elif texto == "relatório mês":
+                    contato.chat.send_message(relatorio_mes())
+                elif texto.startswith("relatório "):
+                    cat = texto.replace("relatório ", "")
+                    contato.chat.send_message(relatorio_categoria(cat))
+
+                # Estatísticas
+                elif texto == "top categorias":
+                    contato.chat.send_message(top_categorias())
+                elif texto == "maior gasto":
+                    contato.chat.send_message(maior_gasto())
+                elif texto == "saldo":
+                    contato.chat.send_message(saldo())
+
+                # Definir limite mensal: "limite 3000"
+                elif texto.startswith("limite"):
+                    try:
+                        novo_limite = float(texto.split(" ")[1].replace(",", "."))
+                        contato.chat.send_message(set_limite(novo_limite))
+                    except:
+                        contato.chat.send_message("⚠️ Formato inválido. Use: limite <valor>")
+
+                # Ajuda
+                elif texto == "ajuda":
+                    contato.chat.send_message(
+                        "📌 Comandos disponíveis:\n"
+                        "➡️ gasto <valor> <categoria>\n"
+                        "➡️ relatório (últimos 5 gastos + total)\n"
+                        "➡️ relatório mês (resumo mensal + categorias)\n"
+                        "➡️ relatório <categoria>\n"
+                        "➡️ top categorias\n"
+                        "➡️ maior gasto\n"
+                        "➡️ saldo\n"
+                        "➡️ limite <valor> (define limite mensal)\n"
+                        "➡️ ajuda"
+                    )
+
+    time.sleep(3)
