@@ -10,8 +10,10 @@ import telegram
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CallbackQueryHandler, filters
 
-# ===== CONFIGURAÇÃO =====
-TELEGRAM_TOKEN = "8319337394:AAFrrd64nlaGcMPJyQ5j7247QdFNAVAVTIA"  # <-- substitua pelo seu token
+import os
+
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
